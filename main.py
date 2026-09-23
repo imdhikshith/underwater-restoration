@@ -1,68 +1,33 @@
-import os
-import time
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import Response
+import uvicorn
 
-# Initialize the API
-app = FastAPI(title="Underwater Image Restoration API", version="1.0")
+# Import the processing engine we just built
+from core.opencv_engine import restore_image_opencv
 
-# The Swappable Backend Environment Variable (Defaults to 'opencv')
-BACKEND = os.getenv("RESTORATION_BACKEND", "opencv")
-MODEL_VERSION = f"{BACKEND}-v1.0"
-
-# In-memory dictionary to track metrics (Prometheus stub)
-metrics_store = {
-    "total_requests": 0,
-    "total_errors": 0,
-    "cumulative_latency_seconds": 0.0
-}
+app = FastAPI(title="Underwater Image Restoration API")
 
 @app.get("/")
-async def health_check():
-    """Basic health probe for Render's deployment check."""
-    return {"status": "online", "active_backend": BACKEND}
-
-@app.get("/metrics")
-async def get_metrics():
-    """Observability endpoint for Prometheus to scrape system telemetry."""
-    return JSONResponse(content=metrics_store)
+def health_check():
+    return {"status": "online", "active_backend": "opencv"}
 
 @app.post("/restore")
 async def restore_image(file: UploadFile = File(...)):
-    """Core endpoint that receives the degraded image and returns the restored version."""
-    start_time = time.time()
-    metrics_store["total_requests"] += 1
+    # 1. Read the raw uploaded bytes
+    image_bytes = await file.read()
     
+    # 2. Process the bytes through the OpenCV engine
     try:
-        # Read the uploaded image bytes into memory
-        image_bytes = await file.read()
-        
-        # ---------------------------------------------------------
-        # TODO: The actual image processing logic will be injected here
-        # If BACKEND == 'pytorch': route to Rishi's DL model
-        # Else: route to the OpenCV White Balance + CLAHE baseline
-        # ---------------------------------------------------------
-        
-        # Simulating processing time for the metrics tracker
-        time.sleep(0.1) 
-        
-        latency = time.time() - start_time
-        metrics_store["cumulative_latency_seconds"] += latency
-        
-        # Returning a dummy JSON response for now to prove the routing works.
-        # We also inject the X-Model-Version header for deployment tracking.
-        return JSONResponse(
-            content={
-                "status": "success", 
-                "message": f"Image '{file.filename}' processed via {BACKEND} engine.",
-                "latency_seconds": round(latency, 4)
-            },
-            headers={"X-Model-Version": MODEL_VERSION}
-        )
-        
+        processed_bytes = restore_image_opencv(image_bytes)
+    except ValueError as e:
+        # Client error: They uploaded a text file or broken image
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        metrics_store["total_errors"] += 1
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(e)}
-        )
+        # Server error: Something critically failed in the math/memory
+        raise HTTPException(status_code=500, detail="Internal processing error.")
+
+    # 3. Return the processed bytes formatted as a standard JPEG
+    return Response(content=processed_bytes, media_type="image/jpeg")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
